@@ -1,3 +1,4 @@
+import os
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine, Column, Integer, String, Text
@@ -6,8 +7,9 @@ from pydantic import BaseModel
 from typing import List
 
 # 1. DATABASE CONFIGURATION
-# Replace [YOUR-PASSWORD] with your actual Supabase DB password
-DATABASE_URL = "postgresql://postgres.fskmdhvjwqasdnotbmvt:pcoss2026churchpass@aws-0-eu-central-1.pooler.supabase.com:6543/postgres"
+# Pulls from environment variable on Render, falls back to default string if not set locally
+DEFAULT_DB_URL = "postgresql://postgres.fskmdhvjwqasdnotbmvt:pcoss2026churchpass@aws-0-eu-central-1.pooler.supabase.com:6543/postgres"
+DATABASE_URL = os.getenv("DATABASE_URL", DEFAULT_DB_URL)
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
