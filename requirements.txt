@@ -4,3 +4,6 @@ gunicorn
 sqlalchemy
 psycopg2-binary
 pydantic
+python-multipart
+boto3
+httpx
