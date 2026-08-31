@@ -1,3 +1,4 @@
+import base64
 import os
 import secrets
 import uuid
@@ -13,23 +14,13 @@ from sqlalchemy.orm import Session, declarative_base, sessionmaker
 from sqlalchemy import create_engine
 
 # ===================================================================
-# 1. CONFIGURATION (all from environment variables — nothing sensitive
-#    is hardcoded here. See .env.example for the full list.)
+# 1. CONFIGURATION
 # ===================================================================
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
-    # Local dev fallback only — never used in production. No real
-    # credentials live in this file.
     DATABASE_URL = "sqlite:///./pcoss_dev.db"
 
-ADMIN_KEY = os.getenv("ADMIN_KEY")  # shared password for admin-sermons.html
-
-# Cloudflare R2 (S3-compatible) for gallery uploads
-R2_ACCOUNT_ID = os.getenv("R2_ACCOUNT_ID")
-R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID")
-R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY")
-R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME")
-R2_PUBLIC_URL = os.getenv("R2_PUBLIC_URL", "")  # e.g. https://pub-xxxx.r2.dev (no trailing slash)
+ADMIN_KEY = os.getenv("ADMIN_KEY")
 
 # Resend (email) for contact form notifications
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
@@ -43,7 +34,6 @@ ALLOWED_ORIGINS = [
     "http://localhost:5500",
     "http://localhost:8000",
 ]
-# Add a comma-separated CUSTOM_ORIGINS env var if you attach a custom domain later
 if os.getenv("CUSTOM_ORIGINS"):
     ALLOWED_ORIGINS += [o.strip() for o in os.getenv("CUSTOM_ORIGINS").split(",") if o.strip()]
 
@@ -79,13 +69,12 @@ class VerseDB(Base):
 
 
 class UpdateDB(Base):
-    """Covers both 'announcement' and 'event' post types."""
     __tablename__ = "updates"
     id = Column(Integer, primary_key=True, index=True)
-    type = Column(String, nullable=False)  # "announcement" | "event"
+    type = Column(String, nullable=False)
     title = Column(String, nullable=False)
     date_display = Column(String, nullable=False)
-    event_date = Column(String, nullable=True)  # ISO date string, used for sorting
+    event_date = Column(String, nullable=True)
     description = Column(Text, nullable=False)
     created_at = Column(DateTime, server_default=func.now())
 
@@ -95,8 +84,8 @@ class GalleryItemDB(Base):
     id = Column(Integer, primary_key=True, index=True)
     title = Column(String, nullable=False)
     description = Column(Text, nullable=True)
-    media_type = Column(String, nullable=False)  # "image" | "video"
-    file_url = Column(String, nullable=False)
+    media_type = Column(String, nullable=False)
+    file_url = Column(Text, nullable=False)
     created_at = Column(DateTime, server_default=func.now())
 
 
@@ -120,7 +109,7 @@ app = FastAPI(title="PCOSS Church API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
-    allow_origin_regex=r"https://.*\.pcoss-church\.pages\.dev",  # Cloudflare Pages preview deploys
+    allow_origin_regex=r"https://.*\.pcoss-church\.pages\.dev",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -172,7 +161,7 @@ class VerseResponse(VerseCreate):
 
 
 class UpdateCreate(BaseModel):
-    type: str  # "announcement" | "event"
+    type: str
     title: str
     date_display: str
     event_date: Optional[str] = None
@@ -210,13 +199,9 @@ class ContactCreate(BaseModel):
 
 
 # ===================================================================
-# 5. HELPERS — R2 upload + Resend email (both best-effort / lazy-init
-#    so the app still boots if these env vars aren't set yet)
+# 5. HELPERS — Database Base64 storage & Resend email
 # ===================================================================
 def upload_to_r2(file: UploadFile) -> tuple[str, str]:
-    if not all([R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME, R2_PUBLIC_URL]):
-        raise HTTPException(status_code=500, detail="Server misconfigured: R2 storage env vars are not set")
-
     content_type = file.content_type or "application/octet-stream"
     if content_type.startswith("image/"):
         media_type = "image"
@@ -225,33 +210,18 @@ def upload_to_r2(file: UploadFile) -> tuple[str, str]:
     else:
         raise HTTPException(status_code=400, detail="Only image or video files are allowed")
 
-    import boto3
-    from botocore.client import Config as BotoConfig
-
-    s3 = boto3.client(
-        "s3",
-        endpoint_url=f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com",
-        aws_access_key_id=R2_ACCESS_KEY_ID,
-        aws_secret_access_key=R2_SECRET_ACCESS_KEY,
-        config=BotoConfig(signature_version="s3v4"),
-        region_name="auto",
-    )
-
-    ext = os.path.splitext(file.filename or "")[1]
-    key = f"gallery/{uuid.uuid4().hex}{ext}"
-
     try:
-        s3.upload_fileobj(file.file, R2_BUCKET_NAME, key, ExtraArgs={"ContentType": content_type})
+        file_bytes = file.file.read()
+        encoded = base64.b64encode(file_bytes).decode("utf-8")
+        data_uri = f"data:{content_type};base64,{encoded}"
+        return data_uri, media_type
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Upload to storage failed: {e}")
-
-    url = f"{R2_PUBLIC_URL.rstrip('/')}/{key}"
-    return url, media_type
+        raise HTTPException(status_code=500, detail=f"Failed to process file: {e}")
 
 
 def send_contact_email(name: str, email: str, reason: Optional[str], message: str) -> None:
     if not RESEND_API_KEY or not RESEND_TO_EMAIL:
-        return  # email notifications not configured — message is still saved to DB
+        return
     try:
         httpx.post(
             "https://api.resend.com/emails",
@@ -349,12 +319,18 @@ def create_gallery_item(
     media_file: UploadFile = File(...),
     db: Session = Depends(get_db),
 ):
-    file_url, media_type = upload_to_r2(media_file)
-    new_item = GalleryItemDB(title=title, description=description, media_type=media_type, file_url=file_url)
-    db.add(new_item)
-    db.commit()
-    db.refresh(new_item)
-    return new_item
+    import traceback
+    try:
+        file_url, media_type = upload_to_r2(media_file)
+        new_item = GalleryItemDB(title=title, description=description, media_type=media_type, file_url=file_url)
+        db.add(new_item)
+        db.commit()
+        db.refresh(new_item)
+        return new_item
+    except Exception as e:
+        print("CRITICAL ERROR IN GALLERY UPLOAD:")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # --- Contact ---
