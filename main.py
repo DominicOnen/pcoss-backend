@@ -328,10 +328,9 @@ def create_gallery_item(
         db.refresh(new_item)
         return new_item
     except Exception as e:
-        print("CRITICAL ERROR IN GALLERY UPLOAD:")
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
-
+        error_details = traceback.format_exc()
+        print("CRITICAL ERROR IN GALLERY UPLOAD:\n", error_details)
+        raise HTTPException(status_code=500, detail=str(e) + " || TRACE: " + error_details)
 
 # --- Contact ---
 @app.post("/api/contact", status_code=201)
